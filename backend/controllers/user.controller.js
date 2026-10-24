@@ -7,17 +7,67 @@ import saveLocalFile from "../utils/localFileStorage.js";
 
 const useCloudinary = Boolean(process.env.CLOUD_NAME && process.env.API_KEY && process.env.API_SECRET);
 
+// 🔒 Strict Email Regex: Requires username@domain.tld (e.g. name@example.com)
+const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+// 🔒 Strict Phone Regex: Exactly 10 numeric digits
+const phoneRegex = /^[0-9]{10}$/;
+
 export const register = async (req, res) => {
   try {
     const { fullName, email, phoneNumber, password, role } = req.body;
-    console.log(fullName, email, phoneNumber, password, role)
 
-    if (!fullName || !email || !phoneNumber || !role) {
+    if (!fullName || !email || !phoneNumber || !password || !role) {
       return res.status(400).json({
-        message: "something is missing",
+        message: "Please fill in all required fields",
         success: false,
       });
     }
+
+    const trimmedName = fullName.trim();
+    const normalizedEmail = email.toLowerCase().trim();
+    const trimmedPhone = phoneNumber.toString().trim();
+
+    // 🔒 1. Strict Email Format Check (Must have .com, .in, etc.)
+    if (!emailRegex.test(normalizedEmail)) {
+      return res.status(400).json({
+        message: "Invalid email! Email must include a valid domain extension (e.g. name@example.com)",
+        success: false,
+      });
+    }
+
+    // 🔒 2. Strict Phone Number Check (Must be 10 digits)
+    if (!phoneRegex.test(trimmedPhone)) {
+      return res.status(400).json({
+        message: "Invalid phone number! Please enter a valid 10-digit mobile number",
+        success: false,
+      });
+    }
+
+    // 🔒 3. Password Minimum Length Check
+    if (password.length < 6) {
+      return res.status(400).json({
+        message: "Password must be at least 6 characters long",
+        success: false,
+      });
+    }
+
+    // 🔒 4. Role Check
+    if (!["student", "recruiter"].includes(role)) {
+      return res.status(400).json({
+        message: "Invalid role selected. Please choose 'student' or 'recruiter'",
+        success: false,
+      });
+    }
+
+    // 🔒 5. Duplicate Email Check
+    const existingUser = await User.findOne({ email: normalizedEmail });
+    if (existingUser) {
+      return res.status(400).json({
+        message: "An account with this email already exists",
+        success: false,
+      });
+    }
+
     const file = req.file;
     let profilePhotoUrl = "";
     if (file && file.originalname && file.buffer) {
@@ -30,30 +80,29 @@ export const register = async (req, res) => {
         profilePhotoUrl = `${req.protocol}://${req.get("host")}${localPath}`;
       }
     }
-    const user = await User.findOne({ email });
-    if (user) {
-      return res.status(400).json({
-        message: "User already exist with the email",
-      });
-    }
 
     const hashedPassword = await bcrypt.hash(password, 10);
     await User.create({
-      fullName,
-      email,
-      phoneNumber,
+      fullName: trimmedName,
+      email: normalizedEmail,
+      phoneNumber: trimmedPhone,
       password: hashedPassword,
       role,
       profile: {
         profilePhoto: profilePhotoUrl,
       },
     });
+
     return res.status(201).json({
-      message: "Account creted successfully.",
+      message: "Account created successfully. Please login to continue.",
       success: true,
     });
   } catch (error) {
     console.log(error);
+    return res.status(500).json({
+      message: "Failed to create account. Please try again.",
+      success: false,
+    });
   }
 };
 
@@ -62,30 +111,43 @@ export const login = async (req, res) => {
     const { email, password, role } = req.body;
     if (!email || !password || !role) {
       return res.status(400).json({
-        message: "something is missing",
+        message: "Please enter your email, password, and select your role",
         success: false,
       });
     }
-    let user = await User.findOne({ email });
+
+    const normalizedEmail = email.toLowerCase().trim();
+
+    if (!emailRegex.test(normalizedEmail)) {
+      return res.status(400).json({
+        message: "Invalid email format. Please enter a valid email address (e.g. name@example.com)",
+        success: false,
+      });
+    }
+
+    let user = await User.findOne({ email: normalizedEmail });
     if (!user) {
       return res.status(400).json({
-        message: "Incorrect email or pssword",
+        message: "Invalid email or password",
         success: false,
       });
     }
+
     const isPasswordMatch = await bcrypt.compare(password, user.password);
     if (!isPasswordMatch) {
       return res.status(400).json({
-        message: "inccorect email or password",
+        message: "Invalid email or password",
         success: false,
       });
     }
+
     if (role !== user.role) {
       return res.status(400).json({
-        message: "Account doesn't exist with current role.",
+        message: `Account is registered as a ${user.role === "recruiter" ? "Recruiter" : "Job Seeker"}. Please switch to the correct role tab.`,
         success: false,
       });
     }
+
     const tokenData = {
       userId: user._id,
     };
@@ -113,23 +175,31 @@ export const login = async (req, res) => {
         path: "/",
       })
       .json({
-        message: `Welcome back ${user.fullName}`,
+        message: `Welcome back, ${user.fullName}!`,
         user,
         success: true,
       });
   } catch (error) {
     console.log(error);
+    return res.status(500).json({
+      message: "Failed to login. Please try again.",
+      success: false,
+    });
   }
 };
 
 export const logout = async (req, res) => {
   try {
     return res.status(200).cookie("token", "", { maxAge: 0 }).json({
-      message: "logged out successfully",
+      message: "Logged out successfully",
       success: true,
     });
   } catch (error) {
     console.log(error);
+    return res.status(500).json({
+      message: "Failed to logout",
+      success: false,
+    });
   }
 };
 
@@ -144,7 +214,6 @@ export const updateProfile = async (req, res) => {
     let resumeUrl = null;
     let resumeOriginalName = null;
 
-    // Handle profile photo upload
     if (profilePhotoFile && profilePhotoFile.originalname && profilePhotoFile.buffer) {
       const fileUri = getDataUri(profilePhotoFile);
       if (useCloudinary) {
@@ -156,7 +225,6 @@ export const updateProfile = async (req, res) => {
       }
     }
 
-    // Handle resume upload
     if (resumeFile && resumeFile.originalname && resumeFile.buffer) {
       const fileUri = getDataUri(resumeFile);
       if (useCloudinary) {
@@ -171,23 +239,41 @@ export const updateProfile = async (req, res) => {
 
     let skillsArray;
     if (skills) {
-      skillsArray = skills.split(",");
+      skillsArray = typeof skills === "string" ? skills.split(",").map(s => s.trim()).filter(Boolean) : skills;
     }
     const userId = req.id;
     let user = await User.findById(userId);
 
     if (!user) {
-      return res.status(400).json({
-        message: "user not found",
+      return res.status(404).json({
+        message: "User not found",
         success: false,
       });
     }
 
-    if (fullName) user.fullName = fullName;
-    if (email) user.email = email;
-    if (phoneNumber) user.phoneNumber = phoneNumber;
-    if (bio) user.profile.bio = bio;
-    if (skills) user.profile.skills = skillsArray;
+    if (fullName) user.fullName = fullName.trim();
+    if (email) {
+      const normalizedEmail = email.toLowerCase().trim();
+      if (!emailRegex.test(normalizedEmail)) {
+        return res.status(400).json({
+          message: "Please enter a valid email address with a domain",
+          success: false,
+        });
+      }
+      user.email = normalizedEmail;
+    }
+    if (phoneNumber) {
+      const trimmedPhone = phoneNumber.toString().trim();
+      if (!phoneRegex.test(trimmedPhone)) {
+        return res.status(400).json({
+          message: "Please enter a valid 10-digit mobile number",
+          success: false,
+        });
+      }
+      user.phoneNumber = trimmedPhone;
+    }
+    if (bio !== undefined) user.profile.bio = bio;
+    if (skillsArray) user.profile.skills = skillsArray;
 
     if (profilePhotoUrl) user.profile.profilePhoto = profilePhotoUrl;
     if (resumeUrl) {
@@ -205,11 +291,16 @@ export const updateProfile = async (req, res) => {
       profile: user.profile,
     };
     return res.status(200).json({
-      message: "profile updated successfully",
+      message: "Profile updated successfully",
       user,
       success: true,
     });
   } catch (error) {
     console.log(error);
+    return res.status(500).json({
+      message: "Failed to update profile",
+      success: false,
+    });
   }
 };
+
